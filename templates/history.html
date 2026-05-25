@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Analysis History</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        .history-item {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            padding: 20px;
+            background-color: #f9f9f9;
+        }
+        .history-item h2 {
+            margin-top: 0;
+            color: #3498db;
+        }
+        .history-item .meta {
+            font-size: 0.9em;
+            color: #777;
+            margin-bottom: 15px;
+        }
+        .details {
+            display: none;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px dashed #ccc;
+        }
+        .toggle-details {
+            cursor: pointer;
+            color: #3498db;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Analysis History</h1>
+        <p><a href="/">&larr; Back to Screener</a></p>
+
+        {% if analyses %}
+            {% for analysis in analyses %}
+            <div class="history-item">
+                <h2>Analysis from {{ analysis.created_at.strftime('%Y-%m-%d %H:%M') }}</h2>
+                <p class="meta">Match Score: <strong>{{ analysis.match_score }}%</strong></p>
+                <p class="toggle-details" onclick="toggleDetails(this)">Show Details &darr;</p>
+                <div class="details">
+                    <h3>Job Description</h3>
+                    <pre><code>{{ analysis.job_description }}</code></pre>
+                    <h3>Recruiter Summary</h3>
+                    <pre><code>{{ analysis.recruiter_summary }}</code></pre>
+                    <h3>{{ 'Interview Questions' if analysis.decision_type == 'interview_questions' else 'Rejection & Feedback' }}</h3>
+                    <pre><code>{{ analysis.decision_output }}</code></pre>
+                </div>
+            </div>
+            {% endfor %}
+        {% else %}
+            <p>No analysis history found.</p>
+        {% endif %}
+    </div>
+
+    <script>
+        function toggleDetails(element) {
+            const detailsDiv = element.nextElementSibling;
+            detailsDiv.style.display = detailsDiv.style.display === 'none' ? 'block' : 'none';
+            element.innerHTML = detailsDiv.style.display === 'none' ? 'Show Details &darr;' : 'Hide Details &uarr;';
+        }
+    </script>
+</body>
+</html>

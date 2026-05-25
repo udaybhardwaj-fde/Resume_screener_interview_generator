@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Resume Screener & Interview Generator</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>AI Resume Screener & Interview Generator</h1>
+        <div class="form-container">
+            <div class="input-group">
+                <label for="job_description">Job Description</label>
+                <textarea id="job_description" rows="10" placeholder="Paste the job description here..."></textarea>
+            </div>
+            <div class="input-group">
+                <label for="resume">Candidate's Resume</label>
+                <textarea id="resume" rows="15" placeholder="Paste the candidate's resume text here..."></textarea>
+            </div>
+            <button id="analyzeBtn">Analyze</button>
+        </div>
+
+        <div id="loading" class="hidden">
+            <div class="spinner"></div>
+            <p>Analyzing... Please wait.</p>
+        </div>
+
+        <div id="results" class="hidden">
+            <h2>Analysis Results</h2>
+            
+            <div id="analysis-section" class="result-section">
+                <h3>Resume Analysis</h3>
+                <pre><code id="analysis-output"></code></pre>
+            </div>
+
+            <div id="decision-section" class="result-section">
+                <h3 id="decision-title"></h3>
+                <pre><code id="decision-output"></code></pre>
+            </div>
+
+            <div id="summary-section" class="result-section">
+                <h3>Recruiter Summary</h3>
+                <pre><code id="summary-output"></code></pre>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('analyzeBtn').addEventListener('click', async () => {
+            const resume = document.getElementById('resume').value;
+            const job_description = document.getElementById('job_description').value;
+            const resultsDiv = document.getElementById('results');
+            const loadingDiv = document.getElementById('loading');
+
+            if (!resume || !job_description) {
+                alert('Please provide both a job description and a resume.');
+                return;
+            }
+
+            resultsDiv.classList.add('hidden');
+            loadingDiv.classList.remove('hidden');
+
+            const response = await fetch('/analyze', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ resume, job_description })
+            });
+
+            loadingDiv.classList.add('hidden');
+            const data = await response.json();
+
+            if (response.ok) {
+                document.getElementById('analysis-output').textContent = JSON.stringify(data.analysis, null, 2);
+                document.getElementById('summary-output').textContent = data.recruiter_summary;
+                
+                const decisionTitle = document.getElementById('decision-title');
+                const decisionOutput = document.getElementById('decision-output');
+
+                if (data.interview_questions) {
+                    decisionTitle.textContent = 'Generated Interview Questions';
+                    decisionOutput.textContent = data.interview_questions;
+                } else {
+                    decisionTitle.textContent = 'Rejection Reasoning & Feedback';
+                    decisionOutput.textContent = data.rejection_reasoning;
+                }
+                resultsDiv.classList.remove('hidden');
+            } else {
+                alert('Error: ' + data.error);
+            }
+        });
+    </script>
+</body>
+</html>
