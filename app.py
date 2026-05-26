@@ -5,6 +5,7 @@ from flask import Flask, render_template, request, jsonify
 import re
 from flask_sqlalchemy import SQLAlchemy
 from dotenv import load_dotenv
+from pii_validator import PIIValidator
 
 load_dotenv()
 
@@ -201,7 +202,7 @@ def analyze_resume(resume_text, job_description):
     analysis_data = ResumeAnalyzer.analyze(resume_text, job_description)
     score = analysis_data['match_score']
 
-    if score > 70:
+    if score >= 70:
         interview_questions = ResumeAnalyzer.generate_interview_questions(analysis_data)
         decision_output = interview_questions
         result_key = "interview_questions"
@@ -227,8 +228,38 @@ def analyze():
     if not resume_text or not job_description:
         return jsonify({'error': 'Resume and Job Description cannot be empty.'}), 400
 
+    # Validate and detect PII
+    _, pii_info = PIIValidator.validate_resume(resume_text, strict=False)
+    pii_warning = None
+    if pii_info.get('warning'):
+        pii_warning = {
+            'message': pii_info.get('message'),
+            'pii_types': pii_info.get('pii_types')
+        }
+
+    # Redact PII before analysis
+    clean_resume, removed_pii = PIIValidator.redact_pii(resume_text)
+
+    # Debug: Print what's being sent to model
+    print("\n" + "="*80)
+    print("PII VALIDATION & REDACTION DEBUG LOG")
+    print("="*80)
+    print("\n[ORIGINAL RESUME] (First 500 chars):")
+    print(resume_text[:500])
+    print("\n[CLEANED RESUME] (First 500 chars):")
+    print(clean_resume[:500])
+    print("\n[PII DETECTION SUMMARY]:")
+    if removed_pii:
+        print(PIIValidator.get_redaction_report(removed_pii))
+        print("\nDetailed PII Found:")
+        for pii_type, items in removed_pii.items():
+            print(f"  {pii_type}: {items}")
+    else:
+        print("No PII detected - resume sent as-is")
+    print("="*80 + "\n")
+
     try:
-        analysis_data, decision_output, result_key, recruiter_summary = analyze_resume(resume_text, job_description)
+        analysis_data, decision_output, result_key, recruiter_summary = analyze_resume(clean_resume, job_description)
 
         # Store results in the database
         new_analysis = AnalysisResult(
@@ -245,7 +276,8 @@ def analyze():
         response_data = {
             'analysis': analysis_data,
             result_key: decision_output,
-            'recruiter_summary': recruiter_summary
+            'recruiter_summary': recruiter_summary,
+            'pii_warning': pii_warning
         }
 
         return jsonify(response_data), 200
