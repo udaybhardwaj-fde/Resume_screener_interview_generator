@@ -7,88 +7,311 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-    <div class="container">
-        <h1>AI Resume Screener & Interview Generator</h1>
-        <div class="form-container">
-            <div class="input-group">
-                <label for="job_description">Job Description</label>
-                <textarea id="job_description" rows="10" placeholder="Paste the job description here..."></textarea>
+    <main class="app-shell">
+        <header class="topbar">
+            <div>
+                <p class="eyebrow">Recruiting workspace</p>
+                <h1>AI Resume Screener</h1>
             </div>
-            <div class="input-group">
-                <label for="resume">Candidate's Resume</label>
-                <textarea id="resume" rows="15" placeholder="Paste the candidate's resume text here..."></textarea>
-            </div>
-            <button id="analyzeBtn">Analyze</button>
-        </div>
+            <a class="history-link" href="/history">History</a>
+        </header>
 
-        <div id="loading" class="hidden">
-            <div class="spinner"></div>
-            <p>Analyzing... Please wait.</p>
-        </div>
+        <section class="workspace">
+            <form class="input-panel" id="analysisForm">
+                <div class="panel-header">
+                    <div>
+                        <h2>Candidate Inputs</h2>
+                        <p>Upload a resume or paste text, then compare it with the role.</p>
+                    </div>
+                </div>
 
-        <div id="results" class="hidden">
-            <h2>Analysis Results</h2>
-            
-            <div id="analysis-section" class="result-section">
-                <h3>Resume Analysis</h3>
-                <pre><code id="analysis-output"></code></pre>
-            </div>
+                <div class="field-grid">
+                    <div class="input-group">
+                        <label for="resumeFile">Resume Upload</label>
+                        <label class="upload-zone" id="uploadZone" for="resumeFile">
+                            <input id="resumeFile" type="file" accept=".txt,.pdf,.docx">
+                            <span class="upload-title">Choose resume file</span>
+                            <span class="upload-meta">TXT, PDF, or DOCX up to 4 MB</span>
+                        </label>
+                        <div class="file-row">
+                            <span id="fileStatus">No file selected</span>
+                            <button class="secondary-button" id="clearResumeBtn" type="button">Clear</button>
+                        </div>
+                    </div>
 
-            <div id="decision-section" class="result-section">
-                <h3 id="decision-title"></h3>
-                <pre><code id="decision-output"></code></pre>
-            </div>
+                    <div class="input-group">
+                        <label for="job_description">Job Description</label>
+                        <textarea id="job_description" rows="14" placeholder="Paste the job description, required skills, seniority, and role expectations..."></textarea>
+                        <span class="counter" id="jobCounter">0 characters</span>
+                    </div>
 
-            <div id="summary-section" class="result-section">
-                <h3>Recruiter Summary</h3>
-                <pre><code id="summary-output"></code></pre>
-            </div>
-        </div>
-    </div>
+                    <div class="input-group span-2">
+                        <label for="resume">Resume Text</label>
+                        <textarea id="resume" rows="12" placeholder="Resume text will appear here after upload, or you can paste it manually..."></textarea>
+                        <span class="counter" id="resumeCounter">0 characters</span>
+                    </div>
+                </div>
+
+                <div id="message" class="message hidden" role="status"></div>
+
+                <div class="actions">
+                    <button id="analyzeBtn" type="submit">Analyze Candidate</button>
+                    <div id="loading" class="loading hidden">
+                        <span class="spinner"></span>
+                        <span>Analyzing</span>
+                    </div>
+                </div>
+            </form>
+
+            <aside class="result-panel hidden" id="results">
+                <div class="result-header">
+                    <div>
+                        <p class="eyebrow">Screening result</p>
+                        <h2>Analysis</h2>
+                    </div>
+                    <div class="score-card">
+                        <span>Match</span>
+                        <strong id="score-output">0%</strong>
+                    </div>
+                </div>
+
+                <div class="score-bar">
+                    <div id="score-fill"></div>
+                </div>
+
+                <div id="pii-warning" class="message warning hidden"></div>
+
+                <div class="tabs">
+                    <button class="tab active" type="button" data-tab="summary">Summary</button>
+                    <button class="tab" type="button" data-tab="analysis">Signals</button>
+                    <button class="tab" type="button" data-tab="decision">Decision</button>
+                    <button class="tab" type="button" data-tab="plan">Plan</button>
+                </div>
+
+                <section class="tab-panel active" id="tab-summary">
+                    <h3>Recruiter Summary</h3>
+                    <pre><code id="summary-output"></code></pre>
+                </section>
+
+                <section class="tab-panel" id="tab-analysis">
+                    <h3>Resume Signals</h3>
+                    <pre><code id="analysis-output"></code></pre>
+                </section>
+
+                <section class="tab-panel" id="tab-decision">
+                    <h3 id="decision-title"></h3>
+                    <pre><code id="decision-output"></code></pre>
+                </section>
+
+                <section class="tab-panel" id="tab-plan">
+                    <h3>Candidate Improvement Plan</h3>
+                    <pre><code id="improvement-output"></code></pre>
+                </section>
+
+                <section class="assistant-card">
+                    <div>
+                        <p class="eyebrow">AI feedback assistant</p>
+                        <h3>Ask About This Candidate</h3>
+                    </div>
+                    <div class="chat-log" id="chatLog">
+                        <div class="chat-message assistant-message">
+                            Ask me about the score, missing skills, interview focus, shortlist decision, experience, or safety checks.
+                        </div>
+                    </div>
+                    <form class="chat-form" id="chatForm">
+                        <input id="chatQuestion" type="text" placeholder="Example: What are the biggest gaps?" autocomplete="off">
+                        <button type="submit">Ask</button>
+                    </form>
+                </section>
+            </aside>
+        </section>
+    </main>
 
     <script>
-        document.getElementById('analyzeBtn').addEventListener('click', async () => {
-            const resume = document.getElementById('resume').value;
-            const job_description = document.getElementById('job_description').value;
-            const resultsDiv = document.getElementById('results');
-            const loadingDiv = document.getElementById('loading');
+        const resumeInput = document.getElementById('resume');
+        const jobInput = document.getElementById('job_description');
+        const resumeFile = document.getElementById('resumeFile');
+        const fileStatus = document.getElementById('fileStatus');
+        const messageDiv = document.getElementById('message');
+        const loadingDiv = document.getElementById('loading');
+        const analyzeBtn = document.getElementById('analyzeBtn');
+        const resultsDiv = document.getElementById('results');
+        const piiWarningDiv = document.getElementById('pii-warning');
+        const chatLog = document.getElementById('chatLog');
+        const chatQuestion = document.getElementById('chatQuestion');
+        let latestAnalysis = null;
+
+        const updateCounters = () => {
+            document.getElementById('resumeCounter').textContent = `${resumeInput.value.trim().length} characters`;
+            document.getElementById('jobCounter').textContent = `${jobInput.value.trim().length} characters`;
+        };
+
+        const showMessage = (text, type = 'error') => {
+            messageDiv.textContent = text;
+            messageDiv.className = `message ${type}`;
+        };
+
+        const clearMessage = () => messageDiv.classList.add('hidden');
+
+        resumeInput.addEventListener('input', updateCounters);
+        jobInput.addEventListener('input', updateCounters);
+
+        document.getElementById('clearResumeBtn').addEventListener('click', () => {
+            resumeFile.value = '';
+            resumeInput.value = '';
+            fileStatus.textContent = 'No file selected';
+            clearMessage();
+            updateCounters();
+        });
+
+        resumeFile.addEventListener('change', async () => {
+            clearMessage();
+            const file = resumeFile.files[0];
+            if (!file) {
+                fileStatus.textContent = 'No file selected';
+                return;
+            }
+
+            fileStatus.textContent = `Reading ${file.name}...`;
+            const formData = new FormData();
+            formData.append('resume_file', file);
+
+            try {
+                const response = await fetch('/upload-resume', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+
+                if (!response.ok) {
+                    resumeFile.value = '';
+                    fileStatus.textContent = 'Upload failed';
+                    showMessage(data.error || 'Could not read the uploaded resume.');
+                    return;
+                }
+
+                resumeInput.value = data.resume_text;
+                fileStatus.textContent = `${data.filename} loaded (${data.char_count} characters)`;
+                updateCounters();
+            } catch (error) {
+                resumeFile.value = '';
+                fileStatus.textContent = 'Upload failed';
+                showMessage('Unable to upload the resume. Please try again.');
+            }
+        });
+
+        document.querySelectorAll('.tab').forEach((button) => {
+            button.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach((tab) => tab.classList.remove('active'));
+                document.querySelectorAll('.tab-panel').forEach((panel) => panel.classList.remove('active'));
+                button.classList.add('active');
+                document.getElementById(`tab-${button.dataset.tab}`).classList.add('active');
+            });
+        });
+
+        const addChatMessage = (text, role) => {
+            const message = document.createElement('div');
+            message.className = `chat-message ${role}-message`;
+            message.textContent = text;
+            chatLog.appendChild(message);
+            chatLog.scrollTop = chatLog.scrollHeight;
+        };
+
+        document.getElementById('chatForm').addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const question = chatQuestion.value.trim();
+            if (!question) {
+                return;
+            }
+
+            if (!latestAnalysis) {
+                addChatMessage('Run an analysis before asking the assistant.', 'assistant');
+                return;
+            }
+
+            addChatMessage(question, 'user');
+            chatQuestion.value = '';
+
+            try {
+                const response = await fetch('/chat-assistant', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ question, analysis: latestAnalysis })
+                });
+                const data = await response.json();
+                addChatMessage(response.ok ? data.answer : data.error, 'assistant');
+            } catch (error) {
+                addChatMessage('Unable to reach the assistant. Please try again.', 'assistant');
+            }
+        });
+
+        document.getElementById('analysisForm').addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const resume = resumeInput.value.trim();
+            const job_description = jobInput.value.trim();
+
+            clearMessage();
+            piiWarningDiv.classList.add('hidden');
 
             if (!resume || !job_description) {
-                alert('Please provide both a job description and a resume.');
+                showMessage('Please provide both a job description and a resume.');
                 return;
             }
 
             resultsDiv.classList.add('hidden');
             loadingDiv.classList.remove('hidden');
+            analyzeBtn.disabled = true;
+            analyzeBtn.textContent = 'Analyzing...';
 
-            const response = await fetch('/analyze', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ resume, job_description })
-            });
+            try {
+                const response = await fetch('/analyze', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ resume, job_description })
+                });
 
-            loadingDiv.classList.add('hidden');
-            const data = await response.json();
+                const data = await response.json();
 
-            if (response.ok) {
-                document.getElementById('analysis-output').textContent = JSON.stringify(data.analysis, null, 2);
-                document.getElementById('summary-output').textContent = data.recruiter_summary;
-                
-                const decisionTitle = document.getElementById('decision-title');
-                const decisionOutput = document.getElementById('decision-output');
+                if (response.ok) {
+                    const score = data.analysis.match_score || 0;
+                    latestAnalysis = data.analysis;
+                    chatLog.innerHTML = '';
+                    addChatMessage('Analysis loaded. Ask me about score, gaps, strengths, interview focus, shortlist decision, or safety checks.', 'assistant');
+                    document.getElementById('score-output').textContent = `${score}%`;
+                    document.getElementById('score-fill').style.width = `${score}%`;
+                    document.getElementById('analysis-output').textContent = JSON.stringify(data.analysis, null, 2);
+                    document.getElementById('summary-output').textContent = data.recruiter_summary;
+                    document.getElementById('improvement-output').textContent = data.improvement_plan;
 
-                if (data.interview_questions) {
-                    decisionTitle.textContent = 'Generated Interview Questions';
-                    decisionOutput.textContent = data.interview_questions;
+                    const decisionTitle = document.getElementById('decision-title');
+                    const decisionOutput = document.getElementById('decision-output');
+                    if (data.interview_questions) {
+                        decisionTitle.textContent = 'Generated Interview Questions';
+                        decisionOutput.textContent = data.interview_questions;
+                    } else {
+                        decisionTitle.textContent = 'Rejection Reasoning & Feedback';
+                        decisionOutput.textContent = data.rejection_reasoning;
+                    }
+
+                    if (data.pii_warning) {
+                        piiWarningDiv.textContent = `${data.pii_warning.message} Types found: ${data.pii_warning.pii_types.join(', ')}.`;
+                        piiWarningDiv.classList.remove('hidden');
+                    }
+
+                    resultsDiv.classList.remove('hidden');
                 } else {
-                    decisionTitle.textContent = 'Rejection Reasoning & Feedback';
-                    decisionOutput.textContent = data.rejection_reasoning;
+                    showMessage(data.error || 'Analysis failed. Please check the inputs and try again.');
                 }
-                resultsDiv.classList.remove('hidden');
-            } else {
-                alert('Error: ' + data.error);
+            } catch (error) {
+                showMessage('Unable to connect to the analyzer. Please try again.');
+            } finally {
+                loadingDiv.classList.add('hidden');
+                analyzeBtn.disabled = false;
+                analyzeBtn.textContent = 'Analyze Candidate';
             }
         });
+
+        updateCounters();
     </script>
 </body>
 </html>

@@ -1,18 +1,26 @@
 import os
 import json
 import datetime
+from io import BytesIO
 from flask import Flask, render_template, request, jsonify
 import re
 from flask_sqlalchemy import SQLAlchemy
 from dotenv import load_dotenv
+from sqlalchemy import inspect
+from sqlalchemy.exc import OperationalError
+from werkzeug.utils import secure_filename
 from pii_validator import PIIValidator
 
 load_dotenv()
 
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///analysis_history.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'sqlite:///analysis_history.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024
 db = SQLAlchemy(app)
+_db_initialized = False
+ALLOWED_RESUME_EXTENSIONS = {'txt', 'pdf', 'docx'}
+MAX_EXTRACTED_TEXT_LENGTH = 20000
 
 # --- Database Model ---
 class AnalysisResult(db.Model):
@@ -30,6 +38,119 @@ def init_db_command():
     """Creates the database tables."""
     db.create_all()
     print("Initialized the database.")
+
+@app.before_request
+def ensure_database():
+    """Create local SQLite tables automatically for first-time users."""
+    global _db_initialized
+    if not _db_initialized or not inspect(db.engine).has_table(AnalysisResult.__tablename__):
+        db.create_all()
+        _db_initialized = True
+
+def save_analysis_result(analysis_result):
+    """Save analysis history, recreating local tables if the SQLite file is incomplete."""
+    try:
+        db.session.add(analysis_result)
+        db.session.commit()
+    except OperationalError as exc:
+        db.session.rollback()
+        if 'no such table' not in str(exc).lower():
+            raise
+
+        db.create_all()
+        db.session.add(analysis_result)
+        db.session.commit()
+
+def validate_payload(data):
+    """Validate and normalize the incoming analysis payload."""
+    if not isinstance(data, dict):
+        return None, None, 'Request body must be valid JSON.'
+
+    resume_text = (data.get('resume') or '').strip()
+    job_description = (data.get('job_description') or '').strip()
+
+    if not resume_text or not job_description:
+        return None, None, 'Resume and Job Description cannot be empty.'
+
+    if len(resume_text) < 40:
+        return None, None, 'Resume text is too short to analyze reliably.'
+
+    if len(job_description) < 40:
+        return None, None, 'Job description is too short to analyze reliably.'
+
+    if len(resume_text) > 20000 or len(job_description) > 10000:
+        return None, None, 'Input is too large. Please shorten the resume or job description.'
+
+    return resume_text, job_description, None
+
+def allowed_resume_file(filename):
+    """Return True when the uploaded resume extension is supported."""
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_RESUME_EXTENSIONS
+
+def extract_text_from_resume(file_storage):
+    """Extract text from an uploaded resume without storing the file."""
+    original_filename = secure_filename(file_storage.filename or '')
+    if not original_filename:
+        return None, None, 'Please choose a resume file to upload.'
+
+    if not allowed_resume_file(original_filename):
+        return None, original_filename, 'Unsupported file type. Upload a .txt, .pdf, or .docx resume.'
+
+    extension = original_filename.rsplit('.', 1)[1].lower()
+    file_bytes = file_storage.read()
+
+    if not file_bytes:
+        return None, original_filename, 'Uploaded resume file is empty.'
+
+    try:
+        if extension == 'txt':
+            try:
+                extracted_text = file_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                extracted_text = file_bytes.decode('latin-1')
+        elif extension == 'pdf':
+            from pypdf import PdfReader
+
+            reader = PdfReader(BytesIO(file_bytes))
+            extracted_text = '\n'.join(page.extract_text() or '' for page in reader.pages)
+        else:
+            from docx import Document
+
+            document = Document(BytesIO(file_bytes))
+            extracted_text = '\n'.join(paragraph.text for paragraph in document.paragraphs)
+    except Exception as exc:
+        return None, original_filename, f'Could not read resume file: {str(exc)}'
+
+    extracted_text = re.sub(r'\n{3,}', '\n\n', extracted_text).strip()
+    if not extracted_text:
+        return None, original_filename, 'No readable text was found in the uploaded resume.'
+
+    if len(extracted_text) > MAX_EXTRACTED_TEXT_LENGTH:
+        extracted_text = extracted_text[:MAX_EXTRACTED_TEXT_LENGTH]
+
+    return extracted_text, original_filename, None
+
+class SafetyGuard:
+    """Detect unsafe instructions before analysis."""
+
+    PROMPT_INJECTION_PATTERNS = [
+        r'ignore\s+(all\s+)?previous\s+instructions',
+        r'disregard\s+(the\s+)?instructions',
+        r'override\s+(the\s+)?system',
+        r'you\s+are\s+now\s+',
+        r'reveal\s+(your\s+)?prompt',
+        r'print\s+(the\s+)?system\s+prompt',
+        r'always\s+(return|respond)\s+.*100',
+        r'give\s+.*(perfect|maximum)\s+score',
+    ]
+
+    @staticmethod
+    def detect_prompt_injection(text):
+        matches = []
+        for pattern in SafetyGuard.PROMPT_INJECTION_PATTERNS:
+            if re.search(pattern, text, re.IGNORECASE):
+                matches.append(pattern)
+        return matches
 
 class ResumeAnalyzer:
     """Intelligent resume analyzer without external API dependency."""
@@ -53,12 +174,12 @@ class ResumeAnalyzer:
         text_lower = text.lower()
         found_skills = set()
 
-        for category, skills in ResumeAnalyzer.COMMON_SKILLS.items():
+        for skills in ResumeAnalyzer.COMMON_SKILLS.values():
             for skill in skills:
-                if skill in text_lower:
+                if re.search(rf'\b{re.escape(skill)}\b', text_lower):
                     found_skills.add(skill)
 
-        return list(found_skills)
+        return sorted(found_skills)
 
     @staticmethod
     def extract_experience_years(text):
@@ -103,15 +224,15 @@ class ResumeAnalyzer:
         match_score = min(100, max(0, match_score))
 
         # Identify missing requirements
-        missing_requirements = list(job_skills - resume_skills)
+        missing_requirements = sorted(job_skills - resume_skills)
 
         # Identify strengths
-        strengths = [s for s in resume_skills if s in job_skills]
+        strengths = sorted(s for s in resume_skills if s in job_skills)
         if not strengths and resume_skills:
-            strengths = list(resume_skills)[:3]
+            strengths = sorted(resume_skills)[:3]
 
         return {
-            "skills": list(resume_skills),
+            "skills": sorted(resume_skills),
             "experience_years": resume_exp,
             "strengths": strengths or ["Good communication", "Problem solving"],
             "missing_requirements": missing_requirements or ["Domain-specific experience"],
@@ -197,6 +318,28 @@ Their experience level of {experience} years is {'well-suited' if experience >= 
 
         return summary
 
+    @staticmethod
+    def generate_improvement_plan(analysis_data):
+        """Generate a practical candidate improvement plan."""
+        missing = analysis_data.get('missing_requirements', [])
+        score = analysis_data.get('match_score', 0)
+        focus_skills = missing[:3] or ['role-specific project experience']
+
+        plan = [
+            f"Priority focus: improve the {', '.join(focus_skills)} evidence in the resume.",
+            "Add 2-3 measurable project bullets that connect experience directly to the job requirements.",
+            "Create or highlight one portfolio project that demonstrates the strongest missing requirement.",
+        ]
+
+        if score < 50:
+            plan.append("Apply after strengthening the core skill match; the current gap is material.")
+        elif score < 70:
+            plan.append("Consider a screening call if the role can support ramp-up time.")
+        else:
+            plan.append("Use the interview to validate depth in the listed strengths.")
+
+        return "\n".join(f"{index}. {item}" for index, item in enumerate(plan, start=1))
+
 def analyze_resume(resume_text, job_description):
     """Main analysis function."""
     analysis_data = ResumeAnalyzer.analyze(resume_text, job_description)
@@ -212,21 +355,125 @@ def analyze_resume(resume_text, job_description):
         result_key = "rejection_reasoning"
 
     recruiter_summary = ResumeAnalyzer.generate_recruiter_summary(analysis_data, job_description, resume_text)
+    improvement_plan = ResumeAnalyzer.generate_improvement_plan(analysis_data)
 
-    return analysis_data, decision_output, result_key, recruiter_summary
+    return analysis_data, decision_output, result_key, recruiter_summary, improvement_plan
+
+class RecruiterAssistant:
+    """Small rule-based chat assistant for explaining screening results."""
+
+    @staticmethod
+    def answer(question, analysis_data):
+        normalized_question = question.lower()
+        score = analysis_data.get('match_score', 0)
+        skills = analysis_data.get('skills', [])
+        strengths = analysis_data.get('strengths', [])
+        missing = analysis_data.get('missing_requirements', [])
+        experience = analysis_data.get('experience_years', 'unknown')
+
+        if any(term in normalized_question for term in ['score', 'match', 'fit']):
+            return (
+                f"The candidate has a {score}% match score. "
+                f"The score is based on skill overlap, estimated experience, and education signals."
+            )
+
+        if any(term in normalized_question for term in ['missing', 'gap', 'weak', 'lack']):
+            if missing:
+                return f"The main gaps are: {', '.join(missing[:5])}."
+            return "No major skill gaps were detected from the current job description."
+
+        if any(term in normalized_question for term in ['strength', 'strong', 'skill']):
+            if strengths:
+                return f"The strongest matching signals are: {', '.join(strengths[:5])}."
+            if skills:
+                return f"The resume mentions these skills: {', '.join(skills[:5])}."
+            return "I did not find strong skill signals in the resume text."
+
+        if any(term in normalized_question for term in ['interview', 'question', 'ask']):
+            if score >= 70:
+                return (
+                    "This candidate is worth interviewing. Focus questions on project depth, "
+                    "hands-on ownership, debugging approach, and the strongest matched skills."
+                )
+            return (
+                "I would not start with a deep technical interview yet. First validate whether "
+                "the missing requirements can be ramped up quickly."
+            )
+
+        if any(term in normalized_question for term in ['reject', 'shortlist', 'hire', 'decision']):
+            if score >= 75:
+                return "Recommendation: shortlist for interview. The candidate shows strong alignment."
+            if score >= 60:
+                return "Recommendation: consider an initial screening call before a full technical round."
+            return "Recommendation: do not shortlist yet unless the role can support a significant ramp-up."
+
+        if any(term in normalized_question for term in ['experience', 'years', 'senior']):
+            return f"The resume indicates approximately {experience} years of experience."
+
+        if any(term in normalized_question for term in ['pii', 'privacy', 'safe', 'redact']):
+            return (
+                "The app checks for personal information and redacts common PII such as emails, "
+                "phone numbers, addresses, SSNs, dates of birth, and LinkedIn URLs before analysis."
+            )
+
+        return (
+            "I can help explain the score, strengths, missing requirements, interview focus, "
+            "shortlist decision, experience level, or safety checks. Try asking about one of those."
+        )
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
+@app.route('/upload-resume', methods=['POST'])
+def upload_resume():
+    """Extract resume text from an uploaded file."""
+    if 'resume_file' not in request.files:
+        return jsonify({'error': 'No resume file was uploaded.'}), 400
+
+    resume_text, filename, error = extract_text_from_resume(request.files['resume_file'])
+    if error:
+        return jsonify({'error': error}), 400
+
+    return jsonify({
+        'filename': filename,
+        'resume_text': resume_text,
+        'char_count': len(resume_text)
+    }), 200
+
+@app.route('/chat-assistant', methods=['POST'])
+def chat_assistant():
+    """Answer recruiter questions about the latest analysis."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Request body must be valid JSON.'}), 400
+
+    question = (data.get('question') or '').strip()
+    analysis_data = data.get('analysis') or {}
+
+    if not question:
+        return jsonify({'error': 'Question cannot be empty.'}), 400
+
+    if not isinstance(analysis_data, dict) or 'match_score' not in analysis_data:
+        return jsonify({'error': 'Run an analysis before asking the assistant.'}), 400
+
+    return jsonify({
+        'answer': RecruiterAssistant.answer(question, analysis_data)
+    }), 200
+
 @app.route('/analyze', methods=['POST'])
 def analyze():
-    data = request.get_json()
-    resume_text = data.get('resume')
-    job_description = data.get('job_description')
+    data = request.get_json(silent=True)
+    resume_text, job_description, validation_error = validate_payload(data)
 
-    if not resume_text or not job_description:
-        return jsonify({'error': 'Resume and Job Description cannot be empty.'}), 400
+    if validation_error:
+        return jsonify({'error': validation_error}), 400
+
+    injection_matches = SafetyGuard.detect_prompt_injection(f"{resume_text}\n{job_description}")
+    if injection_matches:
+        return jsonify({
+            'error': 'Unsafe prompt-injection style instructions were detected. Please remove instructions that try to override the analyzer.'
+        }), 400
 
     # Validate and detect PII
     _, pii_info = PIIValidator.validate_resume(resume_text, strict=False)
@@ -240,26 +487,21 @@ def analyze():
     # Redact PII before analysis
     clean_resume, removed_pii = PIIValidator.redact_pii(resume_text)
 
-    # Debug: Print what's being sent to model
+    # Log only redaction metadata; never print raw PII to server logs.
     print("\n" + "="*80)
     print("PII VALIDATION & REDACTION DEBUG LOG")
     print("="*80)
-    print("\n[ORIGINAL RESUME] (First 500 chars):")
-    print(resume_text[:500])
     print("\n[CLEANED RESUME] (First 500 chars):")
     print(clean_resume[:500])
     print("\n[PII DETECTION SUMMARY]:")
     if removed_pii:
         print(PIIValidator.get_redaction_report(removed_pii))
-        print("\nDetailed PII Found:")
-        for pii_type, items in removed_pii.items():
-            print(f"  {pii_type}: {items}")
     else:
         print("No PII detected - resume sent as-is")
     print("="*80 + "\n")
 
     try:
-        analysis_data, decision_output, result_key, recruiter_summary = analyze_resume(clean_resume, job_description)
+        analysis_data, decision_output, result_key, recruiter_summary, improvement_plan = analyze_resume(clean_resume, job_description)
 
         # Store results in the database
         new_analysis = AnalysisResult(
@@ -270,13 +512,13 @@ def analyze():
             decision_type=result_key,
             recruiter_summary=recruiter_summary
         )
-        db.session.add(new_analysis)
-        db.session.commit()
+        save_analysis_result(new_analysis)
 
         response_data = {
             'analysis': analysis_data,
             result_key: decision_output,
             'recruiter_summary': recruiter_summary,
+            'improvement_plan': improvement_plan,
             'pii_warning': pii_warning
         }
 
@@ -293,4 +535,4 @@ def history():
     return render_template('history.html', analyses=analyses)
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5001)
+    app.run(debug=os.getenv('FLASK_DEBUG') == '1', port=int(os.getenv('PORT', 5001)))

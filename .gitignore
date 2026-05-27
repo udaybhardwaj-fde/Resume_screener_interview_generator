@@ -7,6 +7,10 @@ venv/
 # Database
 *.db
 
+# Runtime logs
+*.out
+*.err
+
 # Python cache
 __pycache__/
 *.pyc
